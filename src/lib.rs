@@ -20,7 +20,8 @@ However, CGS has a number of advantages:
 */
 #![warn(missing_docs)]
 
-use std::ops;
+use std::marker::PhantomData;
+use std::{mem, ops};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Reference counter type. It doesn't make sense to allocate too much bit for it in regular applications.
@@ -58,6 +59,7 @@ pub struct Pointer<T> {
     pending: PendingRef,
 }
 
+
 /// Read lock on the storage, allows multiple clients to read from the same storage simultaneously.
 pub struct ReadLock<'a, T: 'a> {
     guard: RwLockReadGuard<'a, StorageInner<T>>,
@@ -65,11 +67,25 @@ pub struct ReadLock<'a, T: 'a> {
     pending: PendingRef,
 }
 
+/// Iterator for reading components.
+pub struct ReadIter<'a, T: 'a> {
+    lock: &'a ReadLock<'a, T>,
+    skip_lost: bool,
+    index: usize,
+}
+
 /// Write lock on the storage allows exclusive access.
 pub struct WriteLock<'a, T: 'a> {
     guard: RwLockWriteGuard<'a, StorageInner<T>>,
     storage: StorageRef<T>,
     pending: PendingRef,
+}
+
+/// Iterator for writing components.
+pub struct WriteIter<'b, 'a: 'b, T: 'a> {
+    lock: &'b mut WriteLock<'a, T>,
+    skip_lost: bool,
+    index: usize,
 }
 
 
@@ -158,11 +174,35 @@ impl<T> Drop for Pointer<T> {
 }
 
 
-// Warning: this exposes deleted entries
-impl<'a, T> ops::Deref for ReadLock<'a, T> {
-    type Target = [T];
-    fn deref(&self) -> &Self::Target {
-        &self.guard.data
+/// The item of `ReadIter`.
+pub struct ReadItem<'a, T: 'a> {
+    value: &'a T,
+    index: usize,
+}
+
+impl<'a, T> ops::Deref for ReadItem<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<'a, T> Iterator for ReadIter<'a, T> {
+    type Item = ReadItem<'a, T>;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let id = self.index;
+            if id == self.lock.guard.data.len() {
+                return None
+            }
+            self.index += 1;
+            if !self.skip_lost || self.lock.guard.meta[id] != 0 {
+                return Some(ReadItem {
+                    value: &self.lock.guard.data[id],
+                    index: id,
+                })
+            }
+        }
     }
 }
 
@@ -173,58 +213,138 @@ impl<'a, T> ReadLock<'a, T> {
         &self.guard.data[ptr.index]
     }
 
-    /// Borrow an existing component by index, not affecting it's reference count.
-    pub fn access_index(&self, index: usize) -> Option<&T> {
-        if index < self.guard.data.len() && self.guard.meta[index] != 0 {
-            Some(&self.guard.data[index])
-        } else {
-            None
+    /// Iterate all components in this locked storage.
+    pub fn iter(&'a self) -> ReadIter<'a, T> {
+        ReadIter {
+            lock: self,
+            skip_lost: false,
+            index: 0,
         }
     }
 
-    /// Pin a specific component index with a newly created `Pointer`.
-    /// Returns `false` if the element is dead or out of bounds.
-    pub fn pin(&self, index: usize) -> Option<Pointer<T>> {
-        if index < self.guard.data.len() && self.guard.meta[index] != 0 {
-            self.pending.lock().unwrap().add_ref.push(index);
-            Some(Pointer {
-                index: index,
-                target: self.storage.clone(),
-                pending: self.pending.clone(),
-            })
-        } else {
-            None
+    /// Iterate all components that are still referenced by something.
+    pub fn iter_alive(&'a self) -> ReadIter<'a, T> {
+        ReadIter {
+            lock: self,
+            skip_lost: true,
+            index: 0,
+        }
+    }
+
+    /// Pin an iterated item with a newly created `Pointer`.
+    pub fn pin(&self, item: &ReadItem<'a, T>) -> Pointer<T> {
+        self.pending.lock().unwrap().add_ref.push(item.index);
+        Pointer {
+            index: item.index,
+            target: self.storage.clone(),
+            pending: self.pending.clone(),
         }
     }
 }
 
-// Warning: this exposes deleted entries
-impl<'a, T> ops::Deref for WriteLock<'a, T> {
-    type Target = [T];
-    fn deref(&self) -> &Self::Target {
-        &self.guard.data
+
+/// The item of `WriteIter`.
+pub struct WriteItem<'a, T: 'a> {
+    base: *mut T,
+    index: usize,
+    marker: PhantomData<&'a mut T>,
+}
+
+impl<'a, T> ops::Deref for WriteItem<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe{ & *self.base.offset(self.index as isize) }
     }
 }
 
-// Warning: this exposes deleted entries
-impl<'a, T> ops::DerefMut for WriteLock<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.guard.data
+impl<'a, T> ops::DerefMut for WriteItem<'a, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe{ &mut *self.base.offset(self.index as isize) }
+    }
+}
+
+impl<'b, 'a, T> Iterator for WriteIter<'b, 'a, T> {
+    type Item = WriteItem<'a, T>;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let id = self.index;
+            if id == self.lock.guard.data.len() {
+                return None
+            }
+            self.index += 1;
+            if !self.skip_lost || self.lock.guard.meta[id] != 0 {
+                return Some(WriteItem {
+                    base: self.lock.guard.data.as_mut_ptr(),
+                    index: id,
+                    marker: PhantomData,
+                })
+            }
+        }
     }
 }
 
 impl<'a, T> WriteLock<'a, T> {
     /// Borrow a pointed component for writing.
-    pub fn access(&mut self, ptr: &Pointer<T>) -> &mut T {
-        debug_assert_eq!(&*self.storage as *const _, &*ptr.target as *const _);
-        &mut self.guard.data[ptr.index]
+    pub fn access(&mut self, pointer: &Pointer<T>) -> &mut T {
+        debug_assert_eq!(&*self.storage as *const _, &*pointer.target as *const _);
+        &mut self.guard.data[pointer.index]
     }
 
-    /// Borrow an existing component by index, not affecting it's reference count.
-    pub fn access_index(&mut self, index: usize) -> Option<&mut T> {
-        if index < self.guard.data.len() && self.guard.meta[index] != 0 {
-            Some(&mut self.guard.data[index])
+    /// Iterate all components in this locked storage.
+    pub fn iter<'b>(&'b mut self) -> WriteIter<'b, 'a, T> {
+        WriteIter {
+            lock: self,
+            skip_lost: false,
+            index: 0,
+        }
+    }
+
+    /// Iterate all components that are still referenced by something.
+    pub fn iter_alive<'b>(&'b mut self) -> WriteIter<'b, 'a, T> {
+        WriteIter {
+            lock: self,
+            skip_lost: true,
+            index: 0,
+        }
+    }
+
+    /// Pin an iterated item with a newly created `Pointer`.
+    pub fn pin(&mut self, item: &WriteItem<'a, T>) -> Pointer<T> {
+        // self.guard.meta[item.index] += 1; // requires mutable borrow
+        self.pending.lock().unwrap().add_ref.push(item.index);
+        Pointer {
+            index: item.index,
+            target: self.storage.clone(),
+            pending: self.pending.clone(),
+        }
+    }
+
+    /// Get a `Pointer` to the first element of the storage.
+    pub fn first(&mut self) -> Option<Pointer<T>> {
+        match self.guard.meta.first_mut() {
+            Some(meta) => {
+                *meta += 1;
+                Some(Pointer {
+                    index: 0,
+                    target: self.storage.clone(),
+                    pending: self.pending.clone(),
+                })
+            },
+            None => None,
+        }
+    }
+
+    /// Move the `Pointer` to the next element, if any.
+    pub fn advance(&mut self, mut pointer: Pointer<T>) -> Option<Pointer<T>> {
+        debug_assert_eq!(&*self.storage as *const _, &*pointer.target as *const _);
+        self.guard.meta[pointer.index] -= 1;
+        pointer.index += 1;
+        if pointer.index < self.guard.meta.len() {
+            self.guard.meta[pointer.index] += 1;
+            Some(pointer)
         } else {
+            // the refcount is already updated
+            mem::forget(pointer);
             None
         }
     }

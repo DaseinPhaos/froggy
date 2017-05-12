@@ -23,3 +23,7 @@ skeptic = "0.9"
 
 [dev-dependencies]
 skeptic = "0.9"
+
+[features]
+default = ["inline"]
+inline = []

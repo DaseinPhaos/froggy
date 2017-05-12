@@ -20,6 +20,9 @@ However, CGS has a number of advantages:
 */
 #![warn(missing_docs)]
 
+extern crate streaming_iterator;
+pub use streaming_iterator::StreamingIterator;
+
 use std::marker::PhantomData;
 use std::{mem, ops};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
@@ -432,34 +435,18 @@ impl<'a, T> WriteLock<'a, T> {
         }
     }
 
-    /// Get a `Pointer` to the first element of the storage.
-    pub fn first(&mut self) -> Option<Pointer<T>> {
-        match self.guard.meta.first_mut() {
-            Some(meta) => {
-                *meta += 1;
-                Some(Pointer {
-                    index: 0,
-                    epoch: self.pending.lock().unwrap().epoch[0],
-                    target: self.storage.clone(),
-                    pending: self.pending.clone(),
-                })
+    pub fn pointers(&self) -> PointerIter<T> {
+        let cap = self.guard.meta.len();
+        PointerIter {
+            cap: cap,
+            first: true,
+            pointer: Pointer {
+                index: 0,
+                epoch: 0,
+                target: self.storage.clone(),
+                pending: self.pending.clone(),
             },
-            None => None,
-        }
-    }
-
-    /// Move the `Pointer` to the next element, if any.
-    pub fn advance(&mut self, mut pointer: Pointer<T>) -> Option<Pointer<T>> {
-        debug_assert_eq!(&*self.storage as *const _, &*pointer.target as *const _);
-        self.guard.meta[pointer.index] -= 1;
-        pointer.index += 1;
-        if pointer.index < self.guard.meta.len() {
-            self.guard.meta[pointer.index] += 1;
-            Some(pointer)
-        } else {
-            // the refcount is already updated
-            mem::forget(pointer);
-            None
+            epoch: self.pending.lock().unwrap().epoch.clone(),
         }
     }
 
@@ -485,6 +472,36 @@ impl<'a, T> WriteLock<'a, T> {
             epoch: epoch,
             target: self.storage.clone(),
             pending: self.pending.clone(),
+        }
+    }
+}
+
+pub struct PointerIter<T> {
+    cap: usize,
+    first: bool,
+    pointer: Pointer<T>,
+    epoch: Vec<Epoch>,
+}
+
+impl<T> StreamingIterator for PointerIter<T> {
+    type Item = Pointer<T>;
+    fn advance(&mut self) {
+        if self.first {
+            self.first = false;
+            self.pointer.epoch = self.epoch[0];
+            return;
+        }
+        self.pointer.index += 1;
+        if self.pointer.index < self.cap {
+            self.pointer.epoch = self.epoch[self.pointer.index];
+        }
+    }
+
+    fn get(&self) -> Option<&Pointer<T>> {
+        if self.pointer.index < self.cap {
+            Some(&self.pointer)
+        } else {
+            None
         }
     }
 }

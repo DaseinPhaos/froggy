@@ -17,6 +17,7 @@ build = "build.rs"
 members = ["demos/cubes"]
 
 [dependencies]
+streaming-iterator = "0.1.2"
 
 [build-dependencies]
 skeptic = "0.9"

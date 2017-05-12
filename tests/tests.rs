@@ -1,6 +1,7 @@
 extern crate froggy;
 
 use froggy::Storage;
+use froggy::StreamingIterator;
 
 #[test]
 fn change_by_pointer() {
@@ -64,13 +65,15 @@ fn pointer_iter() {
             w.create(i as i32);
         }
     }
+    assert_eq!(storage.read().iter().count(), 5);
     let mut counter = 0;
     let mut write = storage.write();
-    let mut iter_ptr = write.first();
-    while let Some(ptr) = iter_ptr {
-        assert_eq!(write[&ptr], counter);
+    let mut iter = write.pointers();
+    while let Some(ptr) = iter.next() {
+        assert_eq!(write[ptr], counter);
+        let _weak = ptr.downgrade();
+        let _ptr2 = ptr.clone();
         counter += 1;
-        iter_ptr = write.advance(ptr);
     }
     assert_eq!(counter, 5);
 }

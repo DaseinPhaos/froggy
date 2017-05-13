@@ -381,8 +381,14 @@ impl<T> Clone for WeakPointer<T> {
 impl<T> PartialEq for Pointer<T> {
     #[inline]
     fn eq(&self, other: &Pointer<T>) -> bool {
-        self.data.get_index() == other.data.get_index() &&
-        self.data.get_storage_id() == other.data.get_storage_id()
+        self.data == other.data
+    }
+}
+
+impl<T> PartialEq for WeakPointer<T> {
+    #[inline]
+    fn eq(&self, other: &WeakPointer<T>) -> bool {
+        self.data == other.data
     }
 }
 

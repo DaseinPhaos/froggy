@@ -21,12 +21,12 @@ impl PointerData {
 
     #[inline]
     pub fn get_epoch(&self) -> ::Epoch {
-        self.0.get_bits(40..56) as u16
+        self.0.get_bits(40..56) as ::Epoch
     }
 
     #[inline]
     pub fn get_storage_id(&self) -> ::StorageId {
-        self.0.get_bits(56..64) as u8
+        self.0.get_bits(56..64) as ::StorageId
     }
 
     #[inline]

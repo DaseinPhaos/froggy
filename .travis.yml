@@ -14,3 +14,4 @@ notifications:
 
 script:
   - cargo test --all
+  - cargo bench
